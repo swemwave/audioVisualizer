@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <windowsx.h>
 #include "window.h"
 #include <string>
 #include <cmath>
@@ -49,10 +50,18 @@ void GameTimer::ConsumeAccumulatedTime(float amount) {
 }
 
 // GameWindow implementation
-GameWindow::GameWindow() : hwnd(nullptr), hInstance(nullptr), running(false), width(800), height(600) {}
+GameWindow::GameWindow() : 
+    hwnd(nullptr), 
+    hInstance(nullptr), 
+    running(false), 
+    width(800), 
+    height(600),
+    captureMouse(false)
+{}
 
 GameWindow::~GameWindow() {
     // Clean up resources
+    renderer.Shutdown();
 }
 
 LRESULT CALLBACK GameWindow::WindowProcStatic(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -106,6 +115,45 @@ LRESULT CALLBACK GameWindow::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         PostQuitMessage(0);
         return 0;
 
+    case WM_RBUTTONDOWN:
+        // Right mouse button enables mouse look
+        captureMouse = true;
+        camera.EnableMouseLook(true);
+
+        // Capture the mouse
+        SetCapture(hwnd);
+        ShowCursor(FALSE);
+        return 0;
+
+    case WM_RBUTTONUP:
+        // Right mouse button disables mouse look
+        captureMouse = false;
+        camera.EnableMouseLook(false);
+
+        // Release the mouse
+        ReleaseCapture();
+        ShowCursor(TRUE);
+        return 0;
+
+    case WM_MOUSEMOVE:
+        if (captureMouse) {
+            int xPos = GET_X_LPARAM(lParam);
+            int yPos = GET_Y_LPARAM(lParam);
+
+            // Update camera view based on mouse movement
+            camera.ProcessMouse(xPos, yPos);
+
+            // Reset cursor to center of window to prevent it from leaving the window
+            RECT clientRect;
+            GetClientRect(hwnd, &clientRect);
+            int centerX = (clientRect.right - clientRect.left) / 2;
+            int centerY = (clientRect.bottom - clientRect.top) / 2;
+            POINT pt = { centerX, centerY };
+            ClientToScreen(hwnd, &pt);
+            SetCursorPos(pt.x, pt.y);
+        }
+        return 0;
+
     default:
         return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
@@ -126,22 +174,24 @@ bool GameWindow::Initialize(HINSTANCE hInst, int nCmdShow) {
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszMenuName = nullptr;
-    wc.lpszClassName = L"FractalAudioVizWindowClass";
-    wc.hIconSm = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.lpszClassName = L"FractalAudioViz";
 
     if (!RegisterClassEx(&wc)) {
         MessageBox(nullptr, L"Failed to register window class!", L"Error", MB_OK | MB_ICONERROR);
         return false;
     }
 
-    // Create window
-    hwnd = CreateWindowEx(
-        0,
-        L"FractalAudioVizWindowClass",
-        L"FractalAudioViz - DirectX 11",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, width, height,
-        nullptr, nullptr, hInstance, this  // Pass 'this' pointer for WM_NCCREATE
+    // Create the window
+    hwnd = CreateWindow(
+        L"FractalAudioViz",    // Window class
+        L"Fractal Audio Visualizer",  // Window title
+        WS_OVERLAPPEDWINDOW,   // Window style
+        CW_USEDEFAULT, CW_USEDEFAULT, // Position
+        width, height,         // Size
+        nullptr,               // Parent window
+        nullptr,               // Menu
+        hInstance,             // Instance handle
+        this                   // Additional data
     );
 
     if (!hwnd) {
@@ -149,26 +199,35 @@ bool GameWindow::Initialize(HINSTANCE hInst, int nCmdShow) {
         return false;
     }
 
-    // Show window
-    ShowWindow(hwnd, nCmdShow);
-    UpdateWindow(hwnd);
-
-    // Get the actual client area dimensions
-    RECT clientRect;
-    GetClientRect(hwnd, &clientRect);
-    width = clientRect.right - clientRect.left;
-    height = clientRect.bottom - clientRect.top;
-
-    // Initialize DirectX
-    if (!renderer.Initialize(hwnd, width, height)) {
-        MessageBox(hwnd, L"Failed to initialize DirectX 11!", L"Error", MB_OK | MB_ICONERROR);
+    // Initialize DirectX renderer
+    if (!renderer.Initialize(hwnd, width, height, true)) {
+        MessageBox(hwnd, L"Failed to initialize DirectX renderer!", L"Error", MB_OK | MB_ICONERROR);
         return false;
     }
 
-    // Reset timer
+    // Initialize the camera
+    camera.Initialize(DirectX::XM_PIDIV4, static_cast<float>(width) / static_cast<float>(height), 0.1f, 1000.0f);
+    camera.SetPosition(0.0f, 0.0f, -5.0f);
+
+    // Initialize the cube
+    if (!cube.Initialize(&renderer)) {
+        MessageBox(hwnd, L"Failed to initialize cube!", L"Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    // Position the cube in front of the camera
+    cube.SetPosition(0.0f, 0.0f, 0.0f);
+
+    // Show the window
+    ShowWindow(hwnd, nCmdShow);
+    UpdateWindow(hwnd);
+
+    // Reset the timer
     timer.Reset();
 
+    // Set running flag
     running = true;
+
     return true;
 }
 
@@ -177,74 +236,74 @@ void GameWindow::Run() {
 
     // Main game loop
     while (running) {
-        // Process all available Windows messages
+        // Handle Windows messages
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+
             if (msg.message == WM_QUIT) {
                 running = false;
                 break;
             }
-
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
         }
 
-        if (!running) {
+        if (!running)
             break;
-        }
 
         // Update game timer
         timer.Tick();
 
-        // Fixed timestep loop
+        // Fixed time step for logic updates
         while (timer.GetAccumulator() >= FIXED_TIMESTEP) {
             Update(FIXED_TIMESTEP);
             timer.ConsumeAccumulatedTime(FIXED_TIMESTEP);
         }
 
-        // Render frame
+        // Render the current frame
         Render();
     }
 }
 
 void GameWindow::Update(float deltaTime) {
-    // Update game state
-    // This is called at fixed intervals (60 times per second)
+    // Update game logic here
+    camera.Update(deltaTime);
 
-    // Example: Update the window title with FPS information
-    float fps = 1.0f / timer.GetDeltaTime();
-    float updateRate = 1.0f / FIXED_TIMESTEP;
+    // Update the cube - maybe rotate it slowly
+    static float rotationY = 0.0f;
+    rotationY += 15.0f * deltaTime; // 15 degrees per second
+    if (rotationY > 360.0f) rotationY -= 360.0f;
 
-    std::wstring title = L"FractalAudioViz - DirectX 11 - FPS: " + std::to_wstring(static_cast<int>(fps)) +
-        L" - Update Rate: " + std::to_wstring(static_cast<int>(updateRate)) +
-        L" Hz - Time: " + std::to_wstring(timer.GetTotalTime());
-
-    SetWindowText(hwnd, title.c_str());
+    cube.SetRotation(0.0f, rotationY, 0.0f);
+    cube.Update(deltaTime);
 }
 
 void GameWindow::Render() {
-    // Calculate a pulsing blue color based on time
-    float blueValue = (sinf(timer.GetTotalTime() * 1.0f) + 1.0f) / 2.0f;
+    // Clear the back buffer - use a dark blue background
+    renderer.BeginFrame(0.0f, 0.0f, 0.2f, 1.0f);
 
-    // Begin frame with a dark blue background
-    renderer.BeginFrame(0.0f, 0.0f, blueValue * 0.5f, 1.0f);
+    // Set up world and camera matrices
+    DirectX::XMMATRIX worldMatrix = DirectX::XMMatrixIdentity();
+    renderer.SetMatrices(worldMatrix, &camera);
 
-    // Here is where you'll add DirectX rendering code for your fractal visualization
+    // Render game objects here
+    cube.Render(&renderer);
 
-    // End frame and present to screen
+    // Present the frame
     renderer.EndFrame();
 }
 
-// Standalone function for backward compatibility
+// Global function to initialize window
 bool InitWindow(HINSTANCE hInstance, int nCmdShow) {
-    GameWindow* window = new GameWindow();
+    // Create game window
+    static GameWindow gameWindow;
 
-    if (!window->Initialize(hInstance, nCmdShow)) {
-        delete window;
+    // Initialize the window
+    if (!gameWindow.Initialize(hInstance, nCmdShow)) {
         return false;
     }
 
-    window->Run();
+    // Run the game loop
+    gameWindow.Run();
 
-    delete window;
     return true;
 }

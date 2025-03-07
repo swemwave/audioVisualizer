@@ -2,6 +2,8 @@
 #include <windows.h>
 #include <chrono>
 #include "DXRenderer.h"
+#include "Camera.h"
+#include "Cube.h"
 
 // Game timing constants
 constexpr float FIXED_TIMESTEP = 1.0f / 60.0f; // 60 updates per second
@@ -14,6 +16,7 @@ private:
     float deltaTime;
     float totalTime;
     float accumulator;
+    bool captureMouse;
 
 public:
     GameTimer();
@@ -34,6 +37,9 @@ private:
     GameTimer timer;
     int width;
     int height;
+    bool captureMouse;
+    Camera camera;
+    Cube cube;
 
     // DirectX renderer
     DXRenderer renderer;

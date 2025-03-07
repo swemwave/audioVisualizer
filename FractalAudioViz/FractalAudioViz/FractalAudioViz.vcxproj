@@ -128,6 +128,8 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Camera.h" />
+    <ClInclude Include="Cube.h" />
     <ClInclude Include="DXRenderer.h" />
     <ClInclude Include="FractalAudioViz.h" />
     <ClInclude Include="framework.h" />
@@ -136,6 +138,8 @@
     <ClInclude Include="window.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Camera.cpp" />
+    <ClCompile Include="Cube.cpp" />
     <ClCompile Include="DXRenderer.cpp" />
     <ClCompile Include="FractalAudioViz.cpp" />
     <ClCompile Include="window.cpp" />

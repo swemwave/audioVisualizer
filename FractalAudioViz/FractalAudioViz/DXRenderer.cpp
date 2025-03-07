@@ -1,5 +1,7 @@
 #include "DXRenderer.h"
+#include "Camera.h"
 #include <stdexcept>
+
 
 DXRenderer::DXRenderer() :
     hwnd(nullptr),
@@ -7,6 +9,8 @@ DXRenderer::DXRenderer() :
     height(0),
     vsync(true)
 {
+    // Initialize world matrix to identity
+    worldMatrix = DirectX::XMMatrixIdentity();
 }
 
 DXRenderer::~DXRenderer() {
@@ -160,10 +164,33 @@ bool DXRenderer::Initialize(HWND windowHandle, int windowWidth, int windowHeight
         return false;
     }
 
+    // Create blend state for alpha blending
+    D3D11_BLEND_DESC blendDesc = {};
+    blendDesc.AlphaToCoverageEnable = FALSE;
+    blendDesc.IndependentBlendEnable = FALSE;
+    blendDesc.RenderTarget[0].BlendEnable = TRUE;
+    blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    blendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    blendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    blendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+
+    hr = device->CreateBlendState(&blendDesc, blendState.GetAddressOf());
+    if (FAILED(hr)) {
+        MessageBox(hwnd, L"Failed to create blend state!", L"Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
     // Set the active states
     deviceContext->OMSetRenderTargets(1, renderTargetView.GetAddressOf(), depthStencilView.Get());
     deviceContext->OMSetDepthStencilState(depthStencilState.Get(), 1);
     deviceContext->RSSetState(rasterizerState.Get());
+
+    // Set the blend state
+    float blendFactor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    deviceContext->OMSetBlendState(blendState.Get(), blendFactor, 0xFFFFFFFF);
 
     // Set up the viewport
     D3D11_VIEWPORT viewport = {};
@@ -175,8 +202,192 @@ bool DXRenderer::Initialize(HWND windowHandle, int windowWidth, int windowHeight
     viewport.TopLeftY = 0.0f;
     deviceContext->RSSetViewports(1, &viewport);
 
+    // Create basic shaders and input layout
+    if (!CreateBasicShaders()) {
+        return false;
+    }
+
+    if (!CreateConstantBuffers()) {
+        return false;
+    }
+
     // Successfully initialized
     return true;
+}
+
+bool DXRenderer::CreateBasicShaders() {
+    // Define the vertex shader code with matrix transformations
+    const char* vertexShaderCode = R"(
+        cbuffer MatrixBuffer : register(b0)
+        {
+            matrix worldMatrix;
+            matrix viewMatrix;
+            matrix projectionMatrix;
+        };
+        
+        struct VertexInput {
+            float3 position : POSITION;
+            float4 color : COLOR;
+        };
+        
+        struct PixelInput {
+            float4 position : SV_POSITION;
+            float4 color : COLOR;
+        };
+        
+        PixelInput main(VertexInput input) {
+            PixelInput output;
+            
+            // Change the position vector to be 4 units for proper matrix calculations
+            float4 pos = float4(input.position, 1.0f);
+            
+            // Transform the vertex position using the world matrix
+            pos = mul(pos, worldMatrix);
+            
+            // Transform the position using the view matrix
+            pos = mul(pos, viewMatrix);
+            
+            // Transform the position using the projection matrix
+            pos = mul(pos, projectionMatrix);
+            
+            output.position = pos;
+            output.color = input.color;
+            
+            return output;
+        }
+    )";
+
+    // Compile the vertex shader
+    Microsoft::WRL::ComPtr<ID3DBlob> vsBlob;
+    Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
+    HRESULT hr = D3DCompile(
+        vertexShaderCode, strlen(vertexShaderCode),
+        "VertexShader", nullptr, nullptr, "main", "vs_4_0",
+        D3DCOMPILE_ENABLE_STRICTNESS, 0,
+        vsBlob.GetAddressOf(), errorBlob.GetAddressOf()
+    );
+
+    if (FAILED(hr)) {
+        if (errorBlob) {
+            MessageBoxA(hwnd, (char*)errorBlob->GetBufferPointer(), "Vertex Shader Compilation Error", MB_OK | MB_ICONERROR);
+        }
+        return false;
+    }
+
+    // Create the vertex shader
+    hr = device->CreateVertexShader(
+        vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
+        nullptr, vertexShader.GetAddressOf()
+    );
+
+    if (FAILED(hr)) {
+        MessageBox(hwnd, L"Failed to create vertex shader!", L"Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    // Define the input layout
+    D3D11_INPUT_ELEMENT_DESC inputLayoutDesc[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+    };
+
+    // Create the input layout
+    hr = device->CreateInputLayout(
+        inputLayoutDesc, ARRAYSIZE(inputLayoutDesc),
+        vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
+        inputLayout.GetAddressOf()
+    );
+
+    if (FAILED(hr)) {
+        MessageBox(hwnd, L"Failed to create input layout!", L"Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    // Define pixel shader code
+    const char* pixelShaderCode = R"(
+        struct PixelInput {
+            float4 position : SV_POSITION;
+            float4 color : COLOR;
+        };
+        
+        float4 main(PixelInput input) : SV_TARGET {
+            return input.color;
+        }
+    )";
+
+    // Compile the pixel shader
+    Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
+    hr = D3DCompile(
+        pixelShaderCode, strlen(pixelShaderCode),
+        "PixelShader", nullptr, nullptr, "main", "ps_4_0",
+        D3DCOMPILE_ENABLE_STRICTNESS, 0,
+        psBlob.GetAddressOf(), errorBlob.GetAddressOf()
+    );
+
+    if (FAILED(hr)) {
+        if (errorBlob) {
+            MessageBoxA(hwnd, (char*)errorBlob->GetBufferPointer(), "Pixel Shader Compilation Error", MB_OK | MB_ICONERROR);
+        }
+        return false;
+    }
+
+    // Create the pixel shader
+    hr = device->CreatePixelShader(
+        psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
+        nullptr, pixelShader.GetAddressOf()
+    );
+
+    if (FAILED(hr)) {
+        MessageBox(hwnd, L"Failed to create pixel shader!", L"Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    return true;
+}
+
+// Add new function to create constant buffers
+bool DXRenderer::CreateConstantBuffers() {
+    // Create matrix constant buffer
+    D3D11_BUFFER_DESC matrixBufferDesc;
+    matrixBufferDesc.Usage = D3D11_USAGE_DYNAMIC;
+    matrixBufferDesc.ByteWidth = sizeof(MatrixBufferType);
+    matrixBufferDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    matrixBufferDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    matrixBufferDesc.MiscFlags = 0;
+    matrixBufferDesc.StructureByteStride = 0;
+
+    HRESULT hr = device->CreateBuffer(&matrixBufferDesc, nullptr, matrixBuffer.GetAddressOf());
+    if (FAILED(hr)) {
+        MessageBox(hwnd, L"Failed to create matrix constant buffer!", L"Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    return true;
+}
+
+// Add function to set matrices for rendering
+void DXRenderer::SetMatrices(const DirectX::XMMATRIX& world, const Camera* camera) {
+    // Store the world matrix
+    worldMatrix = world;
+
+    // Map the constant buffer
+    D3D11_MAPPED_SUBRESOURCE mappedResource;
+    HRESULT hr = deviceContext->Map(matrixBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
+    if (SUCCEEDED(hr)) {
+        // Get a pointer to the constant buffer data
+        MatrixBufferType* dataPtr = (MatrixBufferType*)mappedResource.pData;
+
+        // Transpose matrices for HLSL
+        dataPtr->world = DirectX::XMMatrixTranspose(worldMatrix);
+        dataPtr->view = DirectX::XMMatrixTranspose(camera->GetViewMatrix());
+        dataPtr->projection = DirectX::XMMatrixTranspose(camera->GetProjectionMatrix());
+
+        // Unmap the constant buffer
+        deviceContext->Unmap(matrixBuffer.Get(), 0);
+
+        // Set the constant buffer in the vertex shader
+        deviceContext->VSSetConstantBuffers(0, 1, matrixBuffer.GetAddressOf());
+    }
 }
 
 void DXRenderer::Shutdown() {
@@ -185,6 +396,10 @@ void DXRenderer::Shutdown() {
         deviceContext->ClearState();
 
     // Release all DirectX resources in reverse order
+    inputLayout.Reset();
+    vertexShader.Reset();
+    pixelShader.Reset();
+    blendState.Reset();
     renderTargetView.Reset();
     depthStencilView.Reset();
     depthStencilState.Reset();
@@ -285,6 +500,18 @@ void DXRenderer::BeginFrame(float r, float g, float b, float a) {
     float clearColor[4] = { r, g, b, a };
     deviceContext->ClearRenderTargetView(renderTargetView.Get(), clearColor);
     deviceContext->ClearDepthStencilView(depthStencilView.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+
+    // Set the blend state
+    float blendFactor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    deviceContext->OMSetBlendState(blendState.Get(), blendFactor, 0xFFFFFFFF);
+
+    // Set shaders and input layout for this frame
+    deviceContext->VSSetShader(vertexShader.Get(), nullptr, 0);
+    deviceContext->PSSetShader(pixelShader.Get(), nullptr, 0);
+    deviceContext->IASetInputLayout(inputLayout.Get());
+
+    // Set primitive topology
+    deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 }
 
 void DXRenderer::EndFrame() {
